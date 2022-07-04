@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
@@ -15,44 +16,73 @@
 #include "esp_log.h"
 #include "lvgl.h"
 
+#include "gprof.h"
+#include "gprof/io.h"
+
 static const char *TAG = "example";
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Please update the following configuration according to your LCD spec //////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (10 * 1000 * 1000)
-#define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
-#define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_BK_LIGHT       39
-#define EXAMPLE_PIN_NUM_HSYNC          47
-#define EXAMPLE_PIN_NUM_VSYNC          48
-#define EXAMPLE_PIN_NUM_DE             45
-#define EXAMPLE_PIN_NUM_PCLK           21
-#define EXAMPLE_PIN_NUM_DATA0          3  // B0
-#define EXAMPLE_PIN_NUM_DATA1          4  // B1
-#define EXAMPLE_PIN_NUM_DATA2          5  // B2
-#define EXAMPLE_PIN_NUM_DATA3          6  // B3
-#define EXAMPLE_PIN_NUM_DATA4          7  // B4
-#define EXAMPLE_PIN_NUM_DATA5          8  // G0
-#define EXAMPLE_PIN_NUM_DATA6          9  // G1
-#define EXAMPLE_PIN_NUM_DATA7          10 // G2
-#define EXAMPLE_PIN_NUM_DATA8          11 // G3
-#define EXAMPLE_PIN_NUM_DATA9          12 // G4
-#define EXAMPLE_PIN_NUM_DATA10         13 // G5
-#define EXAMPLE_PIN_NUM_DATA11         14 // R0
-#define EXAMPLE_PIN_NUM_DATA12         15 // R1
-#define EXAMPLE_PIN_NUM_DATA13         16 // R2
-#define EXAMPLE_PIN_NUM_DATA14         17 // R3
-#define EXAMPLE_PIN_NUM_DATA15         18 // R4
-#define EXAMPLE_PIN_NUM_DISP_EN        -1
+#define EXAMPLE_PIN_NUM_HSYNC          (46)
+#define EXAMPLE_PIN_NUM_VSYNC          (3)
+#define EXAMPLE_PIN_NUM_DE             (0)
+#define EXAMPLE_PIN_NUM_PCLK           (9)
+#define EXAMPLE_PIN_NUM_DATA0          (14) // B0
+#define EXAMPLE_PIN_NUM_DATA1          (13) // B1
+#define EXAMPLE_PIN_NUM_DATA2          (12) // B2
+#define EXAMPLE_PIN_NUM_DATA3          (11) // B3
+#define EXAMPLE_PIN_NUM_DATA4          (10) // B4
+#define EXAMPLE_PIN_NUM_DATA5          (39) // G0
+#define EXAMPLE_PIN_NUM_DATA6          (38) // G1
+#define EXAMPLE_PIN_NUM_DATA7          (45) // G2
+#define EXAMPLE_PIN_NUM_DATA8          (48) // G3
+#define EXAMPLE_PIN_NUM_DATA9          (47) // G4
+#define EXAMPLE_PIN_NUM_DATA10         (21) // G5
+#define EXAMPLE_PIN_NUM_DATA11         (1)  // R0
+#define EXAMPLE_PIN_NUM_DATA12         (2)  // R1
+#define EXAMPLE_PIN_NUM_DATA13         (42) // R2
+#define EXAMPLE_PIN_NUM_DATA14         (41) // R3
+#define EXAMPLE_PIN_NUM_DATA15         (40) // R4
+#define EXAMPLE_PIN_NUM_DISP_EN        (-1)
 
 // The pixel number in horizontal and vertical
-#define EXAMPLE_LCD_H_RES              480
-#define EXAMPLE_LCD_V_RES              272
+#define EXAMPLE_LCD_H_RES              800
+#define EXAMPLE_LCD_V_RES              480
 
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 
+#define GPROF_TIME  (10 * 1000 * 1000)
+
+static SemaphoreHandle_t xSemaphore = NULL;
+static esp_timer_handle_t gprof_timer = NULL;
+
 extern void example_lvgl_demo_ui(lv_obj_t *scr);
+
+static void gprof_end(void *pvParameters)
+{
+    xSemaphoreTake(xSemaphore, portMAX_DELAY);
+
+    gprof_save_data();
+
+    vTaskDelete(NULL);
+}
+
+static void gprof_timer_callback(void* arg)
+{
+    xSemaphoreGive(xSemaphore);
+}
+
+static void gprof_timer_init(void)
+{
+    const esp_timer_create_args_t gprof_timer_args = {
+        .callback = &gprof_timer_callback,
+        .name = "gprof_timer"
+    };
+
+    ESP_ERROR_CHECK(esp_timer_create(&gprof_timer_args, &gprof_timer));
+}
 
 static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
@@ -74,15 +104,22 @@ static void example_increase_lvgl_tick(void *arg)
 
 void app_main(void)
 {
+    gprof_init();
+
+    xSemaphore = xSemaphoreCreateBinary();
+    if (xSemaphore == NULL) {
+        ESP_LOGE(TAG, "xSemaphore create failed");
+        return;
+    }
+
+    xTaskCreate(gprof_end, "gprof_end", 1024 * 4, NULL, 3, NULL);
+
+    gprof_timer_init();
+
+    esp_timer_start_once(gprof_timer, GPROF_TIME);
+
     static lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
     static lv_disp_drv_t disp_drv;      // contains callback functions
-
-    ESP_LOGI(TAG, "Turn off LCD backlight");
-    gpio_config_t bk_gpio_config = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT
-    };
-    ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
 
     ESP_LOGI(TAG, "Install RGB panel driver");
     esp_lcd_panel_handle_t panel_handle = NULL;
@@ -118,12 +155,12 @@ void app_main(void)
             .h_res = EXAMPLE_LCD_H_RES,
             .v_res = EXAMPLE_LCD_V_RES,
             // The following parameters should refer to LCD spec
-            .hsync_back_porch = 40,
-            .hsync_front_porch = 20,
-            .hsync_pulse_width = 1,
-            .vsync_back_porch = 8,
-            .vsync_front_porch = 4,
-            .vsync_pulse_width = 1,
+            .hsync_back_porch = 88,
+            .hsync_front_porch = 40,
+            .hsync_pulse_width = 48,
+            .vsync_back_porch = 32,
+            .vsync_front_porch = 13,
+            .vsync_pulse_width = 3,
             .flags.pclk_active_neg = true,
         },
         .flags.fb_in_psram = 1, // allocate frame buffer in PSRAM
@@ -132,9 +169,6 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-
-    ESP_LOGI(TAG, "Turn on LCD backlight");
-    gpio_set_level(EXAMPLE_PIN_NUM_BK_LIGHT, EXAMPLE_LCD_BK_LIGHT_ON_LEVEL);
 
     ESP_LOGI(TAG, "Initialize LVGL library");
     lv_init();
@@ -168,6 +202,8 @@ void app_main(void)
     ESP_LOGI(TAG, "Display LVGL Scatter Chart");
     lv_obj_t *scr = lv_disp_get_scr_act(disp);
     example_lvgl_demo_ui(scr);
+
+    // lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x0000FF), 0);
 
     while (1) {
         // raise the task priority of LVGL and/or reduce the handler period can improve the performance

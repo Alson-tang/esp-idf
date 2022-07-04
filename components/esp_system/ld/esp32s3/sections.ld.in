@@ -258,6 +258,13 @@ SECTIONS
     _instruction_reserved_start = ABSOLUTE(.);
     _text_start = ABSOLUTE(.);
 
+    *libmain.a:(.literal .literal.*)
+    *liblvgl__lvgl.a:(.literal .literal.*)
+    _gprof_text_start = ABSOLUTE(.);
+    *libmain.a:(.text .text.*)
+    *liblvgl__lvgl.a:(.text .text.*)
+    _gprof_text_end = ABSOLUTE(.);
+
     mapping[flash_text]
 
     *(.stub .gnu.warning .gnu.linkonce.literal.* .gnu.linkonce.t.*.literal .gnu.linkonce.t.*)
